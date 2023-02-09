@@ -1,3 +1,4 @@
+import logging
 from config import *
 from aiogram import Bot, Dispatcher
 from aiogram.types import *
@@ -5,19 +6,26 @@ import utils
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.storage import FSMContext
 from aiogram.utils.executor import start_polling
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
 
 bot = Bot(TOKEN)
 dp = Dispatcher(bot)
+dp.middleware.setup(LoggingMiddleware())
+logging.basicConfig(level = logging.INFO)
 dp = Dispatcher(bot, storage = MemoryStorage())
 
 @dp.message_handler(commands='start', state='*')
 async def greeting(message: Message, state: FSMContext):
     await state.finish()
+    utils.saveNewUser(message.from_user.id, message.date)
     kb = InlineKeyboardMarkup()
     kb.add(utils.genInlineButtonWithCallback(START_POLL))
-    if message.from_user.id in admins:
-        kb.add(InlineKeyboardButton(EDIT_MESSAGE[0], callback_data=f'{EDIT_MESSAGE[1]};{GET_CHOICE_WHAT_TO_EDIT};greeting_text'))
+    addEditButtonIfItIsAdmin(kb, message.from_user, WITH_CHOICE_WHAT_TO_EDIT, 'greeting_text')
     await message.answer(utils.getText('greeting_text'), reply_markup = kb)
+
+def addEditButtonIfItIsAdmin(kb: InlineKeyboardMarkup, from_user: User, mode: int, variable: str):
+    if from_user.id in admins:
+        kb.add(InlineKeyboardButton(EDIT_MESSAGE[0], callback_data=f'{EDIT_MESSAGE[1]};{mode};{variable}'))
 
 @dp.message_handler(commands='cancel', state='*')
 async def cancel(message: Message, state: FSMContext):
@@ -36,6 +44,49 @@ async def cancel(message: Message, state: FSMContext):
     else:
         await message.answer('Отмена')
 
+@dp.callback_query_handler(lambda call: call.data == START_POLL)
+async def startPoll(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup()
+    for s in SALARY_LIST:
+        kb.add(utils.genInlineButtonWithCallback(s))
+    addEditButtonIfItIsAdmin(kb, callback.from_user, WITH_CHOICE_WHAT_TO_EDIT, POLL_SALARY_TEXT)
+    await callback.message.edit_text(utils.getText(POLL_SALARY_TEXT), reply_markup = kb)
+
+@dp.callback_query_handler(lambda call: call.data.startswith((SALARY_ANSWER_PREFIX, BACK_TO_MAIN_MENU)))
+async def mainMenu(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup()
+    kb.add(utils.genInlineButtonWithCallback(ASK_A_QUSETION))
+    kb.add(utils.genInlineButtonWithCallback(REGISTER_FOR_COURSE))
+    kb.add(utils.genInlineButtonWithCallback(TARIFS))
+    addEditButtonIfItIsAdmin(kb, callback.from_user, WITH_CHOICE_WHAT_TO_EDIT, MAIN_MENU_TEXT)
+    await callback.message.edit_text(utils.getText(MAIN_MENU_TEXT), reply_markup=kb)
+
+@dp.callback_query_handler(lambda call: call.data == REGISTER_FOR_COURSE)
+async def regForCourse(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup()
+    kb.add(utils.genInlineButtonWithUrl(SEND_PAYMENT_CHEQUE))
+    kb.add(utils.genInlineButtonWithCallback(TARIFS))
+    kb.add(utils.genInlineButtonWithCallback(ASK_A_QUSETION))
+    kb.add(utils.genInlineButtonWithCallback(BACK_TO_MAIN_MENU))
+    addEditButtonIfItIsAdmin(kb, callback.from_user, WITH_CHOICE_WHAT_TO_EDIT, REGISTER_FOR_COURSE_TEXT)
+    await callback.message.edit_text(utils.getText(REGISTER_FOR_COURSE_TEXT), reply_markup=kb)
+
+@dp.callback_query_handler(lambda call: call.data == ASK_A_QUSETION)
+async def askAQuestion(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup()
+    kb.add(utils.genInlineButtonWithUrl(ASK_A_QUSETION_URL))
+    kb.add(utils.genInlineButtonWithCallback(BACK_TO_MAIN_MENU))
+    addEditButtonIfItIsAdmin(kb, callback.from_user, WITH_CHOICE_WHAT_TO_EDIT, ASK_A_QUESTION_INSTRUCTION)
+    await callback.message.edit_text(utils.getText(ASK_A_QUESTION_INSTRUCTION), reply_markup=kb)
+
+@dp.callback_query_handler(lambda call: call.data == TARIFS)
+async def showTarifs(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup()
+    kb.add(utils.genInlineButtonWithCallback(REGISTER_FOR_COURSE))
+    kb.add(utils.genInlineButtonWithCallback(BACK_TO_MAIN_MENU))
+    addEditButtonIfItIsAdmin(kb, callback.from_user, WITH_CHOICE_WHAT_TO_EDIT, TEXT_ABOUT_TARIFS)
+    await callback.message.edit_text(utils.getText(TEXT_ABOUT_TARIFS), reply_markup=kb)
+
 @dp.callback_query_handler(lambda call: call.data.startswith(f'{EDIT_MESSAGE[1]};') and call.from_user.id in admins,
                            state = '*')
 async def getNewText(callback: CallbackQuery, state: FSMContext):
@@ -53,7 +104,7 @@ async def getNewText(callback: CallbackQuery, state: FSMContext):
     if what_to_edit == EDIT_TEXT:
         await bot.send_message(callback.from_user.id, f'Отправьте новый текст для этого сообщения'
             '\n(или /cancel для отмены):')
-    elif what_to_edit == GET_CHOICE_WHAT_TO_EDIT:
+    elif what_to_edit == WITH_CHOICE_WHAT_TO_EDIT:
         text = data['message'].text
         await callback.message.edit_text(
             f'{text}\n\nВыберите кнопку, '
@@ -82,10 +133,9 @@ def getEditablekeyboard(kb: InlineKeyboardMarkup) -> InlineKeyboardButton:
             else:
                 callback_data = b.url
             # restore true text of button if there was canceled editing recently 
-            try:
-                b.text = utils.getText(callback_data) 
-            except ValueError:
-                pass
+            temp_ = utils.getText(callback_data) 
+            if temp_ != callback_data:
+                b.text = temp_
             callback_data = f'{EDIT_MESSAGE[1]};{EDIT_BUTTON};{callback_data}'
             r.append(InlineKeyboardButton(b.text, callback_data=callback_data))
         new_kb.row(*r)
@@ -100,7 +150,7 @@ async def editText(message: Message, state: FSMContext):
         for row in data['message'].reply_markup.inline_keyboard:
             r = []
             for b in row:
-                if b.callback_data.split(';')[0] != EDIT_MESSAGE[1]:
+                if not b.callback_data or b.callback_data.split(';')[0] != EDIT_MESSAGE[1]:
                     r.append(b)
             kb.row(*r)
         text = message.text
@@ -108,7 +158,7 @@ async def editText(message: Message, state: FSMContext):
         kb = editKeyboard(data['message'].reply_markup, data['variable'], message.text)
     kb.row(
         InlineKeyboardButton(CONFIRM_EDITING[0], callback_data=CONFIRM_EDITING[1]),
-        InlineKeyboardButton('⬅️ Назад', callback_data=data['starting_callback_data'])
+        InlineKeyboardButton('Назад↩️', callback_data=data['starting_callback_data'])
     )
     await state.update_data(value = message.text)
     await message.answer('Новое сообщение будет выглядеть так:')
@@ -120,7 +170,7 @@ def editKeyboard(kb: InlineKeyboardMarkup, callback_of_button_to_find: str, new_
     for row in kb.inline_keyboard:
         r = []
         for b in row:
-            c_d = b.callback_data.split(';')[0]
+            c_d = b.url if not b.callback_data else b.callback_data.split(';')[0]
             if c_d != EDIT_MESSAGE[1] or need_edit_button:
                 if c_d == callback_of_button_to_find:
                     b.text = new_text
