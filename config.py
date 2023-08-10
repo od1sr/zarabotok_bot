@@ -2,11 +2,13 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+TESTING=True
 
-TOKEN = os.getenv('bot_token')
+
+TOKEN = os.getenv('bot_token' if not TESTING else 'test_bot_token')
 USER = os.getenv('user')
 PASSWORD = os.getenv('password')
-DATABASE = os.getenv('database')
+DATABASE = os.getenv('database' if not TESTING else 'test_database')
 TEXTS_TABLE = os.getenv('texts_table')
 MEDIA_TABLE = os.getenv('media_table')
 

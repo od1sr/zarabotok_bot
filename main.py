@@ -12,18 +12,39 @@ import sys
 bot = Bot(TOKEN)
 dp = Dispatcher(bot)
 dp.middleware.setup(LoggingMiddleware())
-logging.basicConfig(level = logging.INFO)
+if not TESTING:
+    logging.basicConfig(
+            filename = 'logs.log',
+            filemode = 'a',
+            level = logging.WARNING,
+            format='[%(asctime)s]:(%(levelname)s):%(message)s', datefmt='%b/%d %H:%M:%S'
+    )
+else:
+    logging.basicConfig(
+            level = logging.INFO,
+            format='[%(asctime)s]:(%(levelname)s):%(message)s', datefmt='%b/%d %H:%M:%S'
+    )
 dp = Dispatcher(bot, storage = MemoryStorage())
+
+admin_kb = ReplyKeyboardMarkup(resize_keyboard=True)
+admin_kb.add(InlineKeyboardButton('Рассылка'))
 
 
 @dp.message_handler(commands='start', state='*')
 async def greeting(message: Message, state: FSMContext):
     await state.finish()
+
     utils.saveNewUser(message.from_user.id, message.date)
     kb = InlineKeyboardMarkup()
     kb.add(utils.genInlineButtonWithCallback(START_POLL))
     addEditButtonIfItIsAdmin(kb, message.from_user, WITH_CHOICE_WHAT_TO_EDIT, 'greeting_text')
     await utils.send_message('greeting_text', bot, message.from_user.id, keyboard=kb)
+
+@dp.message_handler(commands='admin', state='*')
+async def admin_panel(message: Message, state: FSMContext):
+    if message.from_user.id not in admins:
+        return
+    await message.answer('Активирована панель администратора', reply_markup=admin_kb)
 
 def addEditButtonIfItIsAdmin(kb: InlineKeyboardMarkup, from_user: User, mode: int, variable: str):
     if from_user.id in admins:
@@ -44,7 +65,7 @@ async def cancel(message: Message, state: FSMContext):
             except:
                 pass
     else:
-        await message.answer('Отмена')
+        await message.answer('Отмена', reply_markup=ReplyKeyboardRemove())
 
 @dp.callback_query_handler(lambda call: call.data == START_POLL)
 async def startPoll(callback: CallbackQuery):
@@ -376,6 +397,86 @@ async def confirmEditing(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(data['message'].text, reply_markup = data['message'].reply_markup)
     await state.finish()
     await callback.answer('Успешно отредактировано')
+
+@dp.message_handler(lambda message: message.from_user.id in admins and message.text.lower() == 'рассылка', state = '*')
+async def mail(message: Message, state: FSMContext):
+    await state.finish()
+
+    await message.answer('Пришлите текст сообщения для отправки:')
+    await utils.MailMessage.get_message.set()
+    
+@dp.message_handler(content_types=ContentType.TEXT, state=utils.MailMessage.get_message)
+async def get_msg_to_mail(message: Message, state: FSMContext):
+    await state.finish()
+    await utils.MailMessage.get_media.set()
+    state = dp.current_state(user=message.from_user.id, chat=message.from_user.id)
+    await state.update_data(text = message.html_text, media=MediaGroup())
+    kb = ReplyKeyboardMarkup()
+    kb.add(KeyboardButton('Готово'))
+    await message.answer(
+        'Пришлите фото, видео, которые хотите прикрепить к сообщению. Нажмите "Готово" на клавиатуре снизу, '
+        'если прикрепите все медиа или не хотите их добавлять.', reply_markup = kb
+    )
+    
+@dp.message_handler(content_types=['photo', 'video'], state = utils.MailMessage.get_media)
+async def attach_media(message: Message, state: FSMContext):
+    data = await state.get_data()
+    caption = '' if data['media'].media else (data['text'] if len(data['text']) <= 1024 else '')
+
+    if message.photo:
+        data['media'].attach_photo(InputMediaPhoto(message.photo[0].file_id, caption, 'HTML'))
+    elif message.video:
+        data['media'].attach_video(InputMediaVideo(message.video.file_id, caption=caption, parse_mode='HTML'))
+    
+    await state.set_data(data)
+
+@dp.message_handler(lambda message: message.text.lower() == 'готово', state=utils.MailMessage.get_media)
+async def get_confirmation_to_send(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.finish()
+    await utils.MailMessage.wait_confirmation.set()
+    state = dp.current_state(user=message.from_user.id, chat=message.from_user.id)
+    await state.set_data(data)
+
+    await message.delete()
+    msg = None
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Да'), KeyboardButton('/cancel'))
+
+    if data['media'].media:
+        if len(data['text']) > 1024:
+            await bot.send_message(message.from_user.id, data['text'], 'HTML')
+        msg = (await bot.send_media_group(message.from_user.id, data['media']))[0]
+    else:
+        msg = await bot.send_message(message.from_user.id, data['text'], 'HTML')
+    
+    await bot.send_message(message.from_user.id, 'Выложить пост?', reply_markup=kb, reply_to_message_id=msg.message_id)
+
+@dp.message_handler(lambda message: message.text.lower() == 'да', state=utils.MailMessage.wait_confirmation)
+async def mail_message(message : Message, state: FSMContext):
+    data = await state.get_data()
+    await state.finish()
+
+    msg = await bot.send_message(message.from_user.id, 'Идёт рассылка...', reply_markup=admin_kb)
+    sucess, unsucess = 0, 0
+
+    for u in utils.getUsers():
+        try:
+            if data['media'].media:
+                if len(data['text']) > 1024:
+                    await bot.send_message(u, data['text'], 'HTML')
+                await bot.send_media_group(u, data['media'])
+            else:
+                await bot.send_message(u, data['text'], 'HTML')
+        except:
+            if TESTING:
+                logging.error('Failed to mail:', exc_info=True)
+            unsucess += 1
+        else:
+            sucess += 1
+    
+    await msg.delete()
+    await bot.send_message(message.from_user.id, f'Всего отправлено: {sucess + unsucess}\nУспешно: {sucess}')
 
 if __name__ == '__main__':
     start_polling(dp, skip_updates=False)

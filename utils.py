@@ -11,6 +11,11 @@ class EditMessage(StatesGroup):
     get_text = State()
     get_media = State()
 
+class MailMessage(StatesGroup):
+    get_message = State()
+    get_media = State()
+    wait_confirmation = State()
+
 def getMessage(text_name: str) -> typing.Tuple[str, typing.List[str]]:
     '''returns text of the message and it's pinned photos' ids'''
     with MySQLConnection(user = USER, password = PASSWORD, database = DATABASE) as conn:
@@ -150,3 +155,10 @@ def editKeyboard(kb: InlineKeyboardMarkup, callback_of_button_to_find: str, new_
         if r:
             new_kb.row(*r)
     return new_kb
+
+def getUsers() -> typing.List[int]:
+    with MySQLConnection(user = USER, password = PASSWORD, database = DATABASE) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(f'SELECT id FROM users')
+            result = cursor.fetchall()
+    return [i[0] for i in result]
